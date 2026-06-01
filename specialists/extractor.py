@@ -1,6 +1,7 @@
 import json
 import logging
-from typing import Tuple
+import os
+from typing import Tuple, Optional
 
 from pydantic import BaseModel, ValidationError
 
@@ -24,9 +25,17 @@ SCHEMA_MAP = {
 
 PROMPT_MAP = EXTRACTOR_MAP
 
+DEFAULT_LLM_CONFIG = {
+    "provider": os.environ.get("LLM_PROVIDER", "deepseek"),
+    "model": os.environ.get("LLM_MODEL", "deepseek-v4-flash"),
+}
+
 
 class ExtractorAgent:
     MAX_RETRIES = 2
+
+    def __init__(self, llm_config: Optional[dict] = None):
+        self._llm_config = llm_config or DEFAULT_LLM_CONFIG
 
     def extract(self, raw_text: str, route_result: dict) -> Tuple[dict, bool]:
         clause_type = route_result.get("clause_type", "unknown")
@@ -34,6 +43,7 @@ class ExtractorAgent:
         prompt = PROMPT_MAP.get(clause_type, PROMPT_MAP.get("safe_conversion", ""))
 
         last_error = []
+        raw_json = None
         for attempt in range(self.MAX_RETRIES + 1):
             raw_json = self._call_llm(prompt, raw_text)
             if raw_json is None:
@@ -46,26 +56,47 @@ class ExtractorAgent:
 
         return raw_json if raw_json else {}, False
 
-    def _call_llm(self, system_prompt: str, user_text: str) -> dict:
+    def _call_llm(self, system_prompt: str, user_text: str) -> Optional[dict]:
+        provider = self._llm_config["provider"]
+        model = self._llm_config["model"]
         try:
-            from zhipuai import ZhipuAI
-            import os
-            api_key = os.environ.get("ZHIPU_API_KEY", "")
-            if not api_key:
-                logger.error("extractor.no_api_key")
+            if provider == "deepseek":
+                from openai import OpenAI
+                api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+                if not api_key:
+                    logger.error("extractor.no_api_key provider=deepseek")
+                    return None
+                client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_text[:8000]},
+                    ],
+                    response_format={"type": "json_object"},
+                )
+                return json.loads(resp.choices[0].message.content)
+            elif provider == "zhipu":
+                from zhipuai import ZhipuAI
+                api_key = os.environ.get("ZHIPU_API_KEY", "")
+                if not api_key:
+                    logger.error("extractor.no_api_key provider=zhipu")
+                    return None
+                client = ZhipuAI(api_key=api_key)
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_text[:8000]},
+                    ],
+                    response_format={"type": "json_object"},
+                )
+                return json.loads(resp.choices[0].message.content)
+            else:
+                logger.error("extractor.unknown_provider: %s", provider)
                 return None
-            client = ZhipuAI(api_key=api_key)
-            resp = client.chat.completions.create(
-                model="glm-5.1",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_text[:8000]},
-                ],
-                response_format={"type": "json_object"},
-            )
-            return json.loads(resp.choices[0].message.content)
         except Exception as e:
-            logger.warning("extractor.llm_error: %s", e)
+            logger.warning("extractor.llm_error provider=%s model=%s: %s", provider, model, e)
             return None
 
     def _pydantic_validate(self, data: dict, schema_cls: type) -> Tuple[bool, list]:

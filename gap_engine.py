@@ -1,17 +1,25 @@
 import json
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
 
+def _get_llm_client():
+    provider = os.environ.get("LLM_PROVIDER", "deepseek")
+    if provider == "deepseek":
+        from openai import OpenAI
+        return OpenAI(
+            api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+            base_url="https://api.deepseek.com",
+        ), "deepseek-v4-flash", provider
+    from zhipuai import ZhipuAI
+    return ZhipuAI(api_key=os.environ.get("ZHIPU_API_KEY", "")), "glm-5.1", provider
+
+
 def run_gap_comparison(extracted_json: dict, calc_result: dict, api_key: str = "") -> dict:
     try:
-        from zhipuai import ZhipuAI
-        import os
-        key = api_key or os.environ.get("ZHIPU_API_KEY", "")
-        if not key:
-            return {"error": "No API key for gap comparison"}
-        client = ZhipuAI(api_key=key)
+        client, model, provider = _get_llm_client()
         params = {k: v for k, v in extracted_json.items() if k != "clause_type"}
         prompt = (
             "You are a general-purpose AI. Given these investment parameters, directly calculate "
@@ -22,7 +30,7 @@ def run_gap_comparison(extracted_json: dict, calc_result: dict, api_key: str = "
             "\"reasoning\": \"<your reasoning>\"}"
         )
         resp = client.chat.completions.create(
-            model="glm-5.1",
+            model=model,
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
         )
@@ -38,7 +46,7 @@ def run_gap_comparison(extracted_json: dict, calc_result: dict, api_key: str = "
             },
             "generic_ai_answer": llm_answer,
             "delta_pct": round(delta, 2),
-            "comparison_note": "Demo only: shows deterministic engine vs generic AI difference",
+            "comparison_note": f"Demo only: deterministic engine vs generic AI ({provider}/{model})",
         }
     except Exception as e:
         logger.warning("gap_engine.error: %s", e)

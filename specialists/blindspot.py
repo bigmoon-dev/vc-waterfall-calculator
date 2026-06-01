@@ -114,14 +114,24 @@ class BlindSpotAgent:
 
     def _llm_scan(self, data: dict) -> list:
         try:
-            from zhipuai import ZhipuAI
             import os
-            api_key = os.environ.get("ZHIPU_API_KEY", "")
-            if not api_key:
-                return []
-            client = ZhipuAI(api_key=api_key)
+            provider = os.environ.get("LLM_PROVIDER", "deepseek")
+            if provider == "deepseek":
+                from openai import OpenAI
+                api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+                if not api_key:
+                    return []
+                client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+                model = "deepseek-v4-flash"
+            else:
+                from zhipuai import ZhipuAI
+                api_key = os.environ.get("ZHIPU_API_KEY", "")
+                if not api_key:
+                    return []
+                client = ZhipuAI(api_key=api_key)
+                model = "glm-5.1"
             resp = client.chat.completions.create(
-                model="glm-5.1",
+                model=model,
                 messages=[
                     {"role": "system", "content": BLINDSPOT_SCAN_PROMPT},
                     {"role": "user", "content": json.dumps(data, ensure_ascii=False)[:4000]},
