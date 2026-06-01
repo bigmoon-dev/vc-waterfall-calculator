@@ -1,0 +1,5 @@
+[general]
+browser_gatherUsageStats = false
+
+[server]
+headless = true
