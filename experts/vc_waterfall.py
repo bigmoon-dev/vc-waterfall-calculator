@@ -104,7 +104,7 @@ class SAFEConversionInput(BaseModel):
     pre_money_valuation: float = Field(..., gt=0, description="Series A pre-money valuation ($)")
     series_a_investment: float = Field(..., gt=0, description="Series A investment amount ($)")
     founder_shares: int = Field(..., gt=0, description="Founder's current share count")
-    discount_rate: Optional[float] = Field(None, gt=0, lt=1, description="SAFE discount rate (e.g. 0.20 for 20%)")
+    discount_rate: Optional[float] = Field(None, ge=0, lt=1, description="SAFE discount rate (e.g. 0.20 for 20%)")
 
     @field_validator('safe_investment', 'safe_cap', 'pre_money_valuation', 'series_a_investment', mode='before')
     @classmethod
@@ -124,6 +124,8 @@ class SAFEConversionInput(BaseModel):
         v = _coerce_float(v)
         if v > 1:
             v = v / D100
+        if v == 0:
+            return None
         return float(v)
 
 
@@ -344,6 +346,7 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
         founder = D(str(inp.founder_shares))
         discount = D(str(inp.discount_rate)) if inp.discount_rate else None
 
+        # ── Step 1: Cap-based baseline ──
         safe_pct_cap = safe_inv / safe_cap
         sa_pct = sa_inv / (pre_money + sa_inv)
         founder_pct_cap = D1 - safe_pct_cap - sa_pct
@@ -351,60 +354,75 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
         if founder_pct_cap <= D0:
             raise ValueError("Founder ownership <= 0%. Check input parameters.")
 
-        total_shares_cap = D(str(founder)) / founder_pct_cap
-        safe_shares_cap = total_shares_cap * safe_pct_cap
-        sa_shares_cap = total_shares_cap * sa_pct
-        price_sa = sa_inv / sa_shares_cap
+        total_cap = D(str(founder)) / founder_pct_cap
+        safe_shares_cap = total_cap * safe_pct_cap
+        sa_shares_cap = total_cap * sa_pct
+        price_sa_cap = sa_inv / sa_shares_cap
         cap_price = safe_inv / safe_shares_cap
 
+        # ── Step 2: Algebraic discount solution (self-consistent) ──
+        # When discount is binding, SA price changes. Solve algebraically:
+        #   S = safe_inv * founder / (pre_money * (1-d) - safe_inv)
+        #   discount_price = (pre_money * (1-d) - safe_inv) / founder
         if discount is not None:
-            discount_price = price_sa * (D1 - discount)
-            if discount_price < cap_price:
-                safe_shares = safe_inv / discount_price
-                safe_pct = safe_shares / (safe_shares + D(str(founder)) + sa_shares_cap)
-                founder_pct = D(str(founder)) / (safe_shares + D(str(founder)) + sa_shares_cap)
-                sa_pct_actual = sa_shares_cap / (safe_shares + D(str(founder)) + sa_shares_cap)
-                total_shares = safe_shares + D(str(founder)) + sa_shares_cap
-                pre_money_verify = (D(str(founder)) + safe_shares) * price_sa
+            denom = pre_money * (D1 - discount) - safe_inv
+            if denom > D0:
+                discount_price = denom / D(str(founder))
+            else:
+                discount_price = None
+
+            if discount_price is not None and discount_price < cap_price:
+                # Discount is binding — recalculate with correct SA price
+                safe_shares_disc = safe_inv / discount_price
+                pre_money_shares = D(str(founder)) + safe_shares_disc
+                price_sa_disc = pre_money / pre_money_shares
+                sa_shares_disc = sa_inv / price_sa_disc
+                total_disc = pre_money_shares + sa_shares_disc
+
+                safe_pct_disc = safe_shares_disc / total_disc
+                sa_pct_disc = sa_shares_disc / total_disc
+                founder_pct_disc = D(str(founder)) / total_disc
+                pre_money_verify = pre_money_shares * price_sa_disc
 
                 return SAFEConversionOutput(
-                    safe_ownership_pct=float(safe_pct * D100),
-                    series_a_ownership_pct=float(sa_pct_actual * D100),
-                    founder_ownership_pct=float(founder_pct * D100),
-                    total_shares=float(total_shares.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
-                    safe_shares=float(safe_shares.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
-                    series_a_shares=float(sa_shares_cap.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
-                    price_per_share=float(price_sa.quantize(D("0.0001"), rounding=ROUND_HALF_UP)),
+                    safe_ownership_pct=float(safe_pct_disc * D100),
+                    series_a_ownership_pct=float(sa_pct_disc * D100),
+                    founder_ownership_pct=float(founder_pct_disc * D100),
+                    total_shares=float(total_disc.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
+                    safe_shares=float(safe_shares_disc.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
+                    series_a_shares=float(sa_shares_disc.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
+                    price_per_share=float(price_sa_disc.quantize(D("0.0001"), rounding=ROUND_HALF_UP)),
                     pre_money_verification=float(pre_money_verify.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
                     effective_mechanism="discount",
                     cap_price_per_share=float(cap_price.quantize(D("0.0001"), rounding=ROUND_HALF_UP)),
                     discount_price_per_share=float(discount_price.quantize(D("0.0001"), rounding=ROUND_HALF_UP)),
                 )
-            else:
-                pre_money_verify = (D(str(founder)) + safe_shares_cap) * price_sa
-                return SAFEConversionOutput(
-                    safe_ownership_pct=float(safe_pct_cap * D100),
-                    series_a_ownership_pct=float(sa_pct * D100),
-                    founder_ownership_pct=float(founder_pct_cap * D100),
-                    total_shares=float(total_shares_cap.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
-                    safe_shares=float(safe_shares_cap.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
-                    series_a_shares=float(sa_shares_cap.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
-                    price_per_share=float(price_sa.quantize(D("0.0001"), rounding=ROUND_HALF_UP)),
-                    pre_money_verification=float(pre_money_verify.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
-                    effective_mechanism="cap",
-                    cap_price_per_share=float(cap_price.quantize(D("0.0001"), rounding=ROUND_HALF_UP)),
-                    discount_price_per_share=float(discount_price.quantize(D("0.0001"), rounding=ROUND_HALF_UP)),
-                )
 
-        pre_money_verify = (D(str(founder)) + safe_shares_cap) * price_sa
+            approx_discount = price_sa_cap * (D1 - discount) if discount else None
+            pre_money_verify = (D(str(founder)) + safe_shares_cap) * price_sa_cap
+            return SAFEConversionOutput(
+                safe_ownership_pct=float(safe_pct_cap * D100),
+                series_a_ownership_pct=float(sa_pct * D100),
+                founder_ownership_pct=float(founder_pct_cap * D100),
+                total_shares=float(total_cap.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
+                safe_shares=float(safe_shares_cap.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
+                series_a_shares=float(sa_shares_cap.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
+                price_per_share=float(price_sa_cap.quantize(D("0.0001"), rounding=ROUND_HALF_UP)),
+                pre_money_verification=float(pre_money_verify.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
+                effective_mechanism="cap",
+                cap_price_per_share=float(cap_price.quantize(D("0.0001"), rounding=ROUND_HALF_UP)),
+                discount_price_per_share=float(approx_discount.quantize(D("0.0001"), rounding=ROUND_HALF_UP)) if approx_discount else None,
+            )
+
+        pre_money_verify = (D(str(founder)) + safe_shares_cap) * price_sa_cap
         return SAFEConversionOutput(
             safe_ownership_pct=float(safe_pct_cap * D100),
             series_a_ownership_pct=float(sa_pct * D100),
             founder_ownership_pct=float(founder_pct_cap * D100),
-            total_shares=float(total_shares_cap.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
+            total_shares=float(total_cap.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
             safe_shares=float(safe_shares_cap.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
             series_a_shares=float(sa_shares_cap.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
-            price_per_share=float(price_sa.quantize(D("0.0001"), rounding=ROUND_HALF_UP)),
+            price_per_share=float(price_sa_cap.quantize(D("0.0001"), rounding=ROUND_HALF_UP)),
             pre_money_verification=float(pre_money_verify.quantize(D("0.01"), rounding=ROUND_HALF_UP)),
             effective_mechanism="cap_only",
             cap_price_per_share=float(cap_price.quantize(D("0.0001"), rounding=ROUND_HALF_UP)),
