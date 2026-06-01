@@ -14,13 +14,20 @@ st.set_page_config(page_title="VC Waterfall Expert", layout="wide", page_icon="ð
 
 def get_api_key():
     try:
+        if "DEEPSEEK_API_KEY" in st.secrets:
+            os.environ["DEEPSEEK_API_KEY"] = st.secrets["DEEPSEEK_API_KEY"]
+            os.environ.setdefault("LLM_PROVIDER", "deepseek")
+            return st.secrets["DEEPSEEK_API_KEY"]
         if "ZHIPU_API_KEY" in st.secrets:
+            os.environ["ZHIPU_API_KEY"] = st.secrets["ZHIPU_API_KEY"]
+            os.environ.setdefault("LLM_PROVIDER", "zhipu")
             return st.secrets["ZHIPU_API_KEY"]
     except Exception:
         pass
-    env_key = os.environ.get("ZHIPU_API_KEY", "")
-    if env_key:
-        return env_key
+    if os.environ.get("DEEPSEEK_API_KEY"):
+        return os.environ["DEEPSEEK_API_KEY"]
+    if os.environ.get("ZHIPU_API_KEY"):
+        return os.environ["ZHIPU_API_KEY"]
     if "fallback_key" in st.session_state and st.session_state.fallback_key:
         return st.session_state.fallback_key
     return None
