@@ -14,6 +14,7 @@ class Phase(Enum):
     IDLE = auto()
     ROUTING = auto()
     EXTRACTION = auto()
+    EXTRACTION_REVIEW = auto()
     BLINDSPOT = auto()
     CALCULATION = auto()
     VALIDATION = auto()
@@ -152,6 +153,8 @@ class PhaseStateMachine:
                 self._execute_routing(ctx)
             elif phase == Phase.EXTRACTION:
                 self._execute_extraction(ctx)
+            elif phase == Phase.EXTRACTION_REVIEW:
+                self._execute_extraction_review(ctx)
             elif phase == Phase.BLINDSPOT:
                 self._execute_blindspot(ctx)
             elif phase == Phase.CALCULATION:
@@ -188,12 +191,15 @@ class PhaseStateMachine:
         sem = semantic_validate(raw_json)
         ctx.semantic_check = sem
 
-        self._check_exit(Phase.BLINDSPOT, {
+        self._check_exit(Phase.EXTRACTION_REVIEW, {
             "pydantic_valid": is_valid,
             "semantic_valid": sem['valid'],
         })
         ctx.raw_text = None
-        self._advance(Phase.BLINDSPOT)
+        self._advance(Phase.EXTRACTION_REVIEW)
+
+    def _execute_extraction_review(self, ctx):
+        pass
 
     def _execute_blindspot(self, ctx):
         from specialists.blindspot import BlindSpotAgent

@@ -30,6 +30,15 @@ D1 = D("1")
 D100 = D("100")
 
 
+def _make_step(step, formula, values, result):
+    return {
+        "step": step,
+        "formula": formula,
+        "values": values,
+        "result": float(result) if isinstance(result, D) else result,
+    }
+
+
 def _coerce_float(v):
     if isinstance(v, (int, float)):
         return float(v)
@@ -224,6 +233,8 @@ class SAFEConversionOutput(BaseModel):
     effective_mechanism: str = "cap_only"
     cap_price_per_share: Optional[float] = None
     discount_price_per_share: Optional[float] = None
+    derivation_steps: List[dict] = []
+    confidence_level: str = "GREEN"
 
 
 class AntiDilutionOutput(BaseModel):
@@ -233,6 +244,8 @@ class AntiDilutionOutput(BaseModel):
     price_reduction_pct: float
     old_shares_outstanding: float
     formula_steps: List[str]
+    derivation_steps: List[dict] = []
+    confidence_level: str = "GREEN"
 
 
 class RoundAllocation(BaseModel):
@@ -251,12 +264,16 @@ class LiquidationWaterfallOutput(BaseModel):
     allocations: List[RoundAllocation]
     common_total: float
     verification_sum: float
+    derivation_steps: List[dict] = []
+    confidence_level: str = "GREEN"
 
 
 class ParticipationClassifyOutput(BaseModel):
     classification: str
     confidence: float
     reasoning: str
+    derivation_steps: List[dict] = []
+    confidence_level: str = "GREEN"
 
 
 # ────────────────────────────────────────────────────────────
@@ -384,6 +401,20 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
                 founder_pct_disc = D(str(founder)) / total_disc
                 pre_money_verify = pre_money_shares * price_sa_disc
 
+                derivation_steps = [
+                    _make_step("SAFE ownership % (discount path)", "SAFE% = safe_investment / discount_price", f"SAFE% = {safe_inv} / {discount_price}", safe_shares_disc / total_disc * D100),
+                    _make_step("SAFE shares (discount)", "safe_shares = safe_investment / discount_price", f"safe_shares = {safe_inv} / {discount_price}", safe_shares_disc),
+                    _make_step("Pre-money shares", "pre_money_shares = founder_shares + safe_shares", f"pre_money_shares = {founder} + {safe_shares_disc}", pre_money_shares),
+                    _make_step("Series A price per share (discount)", "price_SA = pre_money / pre_money_shares", f"price_SA = {pre_money} / {pre_money_shares}", price_sa_disc),
+                    _make_step("Series A shares (discount)", "sa_shares = series_a_investment / price_SA", f"sa_shares = {sa_inv} / {price_sa_disc}", sa_shares_disc),
+                    _make_step("Total shares (discount)", "total = pre_money_shares + sa_shares", f"total = {pre_money_shares} + {sa_shares_disc}", total_disc),
+                    _make_step("SAFE % of total (discount)", "SAFE% = safe_shares / total × 100", f"SAFE% = {safe_shares_disc} / {total_disc} × 100", safe_pct_disc * D100),
+                    _make_step("Series A % of total (discount)", "SA% = sa_shares / total × 100", f"SA% = {sa_shares_disc} / {total_disc} × 100", sa_pct_disc * D100),
+                    _make_step("Founder % of total (discount)", "Founder% = founder_shares / total × 100", f"Founder% = {founder} / {total_disc} × 100", founder_pct_disc * D100),
+                    _make_step("Cap vs discount comparison", "cap_price vs discount_price → lower wins", f"cap_price={cap_price} vs discount_price={discount_price} → discount is binding", discount_price),
+                    _make_step("Price per share (discount)", "price_per_share = pre_money / pre_money_shares", f"price_per_share = {pre_money} / {pre_money_shares}", price_sa_disc),
+                ]
+
                 return SAFEConversionOutput(
                     safe_ownership_pct=float(safe_pct_disc * D100),
                     series_a_ownership_pct=float(sa_pct_disc * D100),
@@ -396,10 +427,30 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
                     effective_mechanism="discount",
                     cap_price_per_share=float(cap_price.quantize(D("0.0001"), rounding=ROUND_HALF_UP)),
                     discount_price_per_share=float(discount_price.quantize(D("0.0001"), rounding=ROUND_HALF_UP)),
+                    derivation_steps=derivation_steps,
                 )
 
             approx_discount = price_sa_cap * (D1 - discount) if discount else None
             pre_money_verify = (D(str(founder)) + safe_shares_cap) * price_sa_cap
+
+            derivation_steps = [
+                _make_step("SAFE ownership % (cap-based)", "SAFE% = safe_investment / safe_cap", f"SAFE% = {safe_inv} / {safe_cap}", safe_pct_cap * D100),
+                _make_step("Series A ownership %", "SA% = series_a_investment / (pre_money + series_a_investment)", f"SA% = {sa_inv} / ({pre_money} + {sa_inv})", sa_pct * D100),
+                _make_step("Founder ownership %", "Founder% = 100% - SAFE% - SA%", f"Founder% = 100% - {safe_pct_cap * D100}% - {sa_pct * D100}%", founder_pct_cap * D100),
+                _make_step("Total shares outstanding", "total_shares = founder_shares / founder%", f"total_shares = {founder} / {founder_pct_cap}", total_cap),
+                _make_step("SAFE shares", "safe_shares = total × SAFE%", f"safe_shares = {total_cap} × {safe_pct_cap}", safe_shares_cap),
+                _make_step("Series A shares", "sa_shares = total × SA%", f"sa_shares = {total_cap} × {sa_pct}", sa_shares_cap),
+                _make_step("Price per share", "price = series_a_investment / sa_shares", f"price = {sa_inv} / {sa_shares_cap}", price_sa_cap),
+                _make_step("SAFE cap price per share", "cap_price = safe_investment / safe_shares", f"cap_price = {safe_inv} / {safe_shares_cap}", cap_price),
+            ]
+            if approx_discount is not None:
+                derivation_steps.append(
+                    _make_step("Discount price (approx)", "discount_price = price_SA × (1 - discount)", f"discount_price = {price_sa_cap} × (1 - {discount})", approx_discount)
+                )
+                derivation_steps.append(
+                    _make_step("Cap vs discount comparison", "cap_price vs discount_price → lower wins", f"cap_price={cap_price} vs discount_price={approx_discount} → cap is binding", cap_price)
+                )
+
             return SAFEConversionOutput(
                 safe_ownership_pct=float(safe_pct_cap * D100),
                 series_a_ownership_pct=float(sa_pct * D100),
@@ -412,9 +463,23 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
                 effective_mechanism="cap",
                 cap_price_per_share=float(cap_price.quantize(D("0.0001"), rounding=ROUND_HALF_UP)),
                 discount_price_per_share=float(approx_discount.quantize(D("0.0001"), rounding=ROUND_HALF_UP)) if approx_discount else None,
+                derivation_steps=derivation_steps,
             )
 
         pre_money_verify = (D(str(founder)) + safe_shares_cap) * price_sa_cap
+
+        derivation_steps = [
+            _make_step("SAFE ownership %", "SAFE% = safe_investment / safe_cap", f"SAFE% = {safe_inv} / {safe_cap}", safe_pct_cap * D100),
+            _make_step("Series A ownership %", "SA% = series_a_investment / (pre_money + series_a_investment)", f"SA% = {sa_inv} / ({pre_money} + {sa_inv})", sa_pct * D100),
+            _make_step("Founder ownership %", "Founder% = 100% - SAFE% - SA%", f"Founder% = 100% - {safe_pct_cap * D100}% - {sa_pct * D100}%", founder_pct_cap * D100),
+            _make_step("Total shares outstanding", "total_shares = founder_shares / founder%", f"total_shares = {founder} / {founder_pct_cap}", total_cap),
+            _make_step("SAFE shares", "safe_shares = total × SAFE%", f"safe_shares = {total_cap} × {safe_pct_cap}", safe_shares_cap),
+            _make_step("Series A shares", "sa_shares = total × SA%", f"sa_shares = {total_cap} × {sa_pct}", sa_shares_cap),
+            _make_step("Price per share", "price = series_a_investment / sa_shares", f"price = {sa_inv} / {sa_shares_cap}", price_sa_cap),
+            _make_step("SAFE cap price per share", "cap_price = safe_investment / safe_shares", f"cap_price = {safe_inv} / {safe_shares_cap}", cap_price),
+            _make_step("Pre-money verification", "pre_money_verify = (founder + safe_shares) × price", f"pre_money_verify = ({founder} + {safe_shares_cap}) × {price_sa_cap}", pre_money_verify),
+        ]
+
         return SAFEConversionOutput(
             safe_ownership_pct=float(safe_pct_cap * D100),
             series_a_ownership_pct=float(sa_pct * D100),
@@ -427,6 +492,7 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
             effective_mechanism="cap_only",
             cap_price_per_share=float(cap_price.quantize(D("0.0001"), rounding=ROUND_HALF_UP)),
             discount_price_per_share=None,
+            derivation_steps=derivation_steps,
         )
 
     # ── Anti-dilution ──────────────────────────────────────
@@ -437,10 +503,18 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
         n_new = D(str(inp.new_shares_issued))
         p_new = D(str(inp.new_share_price))
         steps = []
+        derivation_steps = []
 
         if inp.method == DilutionMethod.FULL_RATCHET:
             cp2 = p_new
             steps.append(f"Full ratchet: CP₂ = P_new = ${float(cp2):.4f}")
+            derivation_steps = [
+                _make_step("Method selection", "Full ratchet: CP₂ = P_new", f"method = full_ratchet → CP₂ = P_new", cp2),
+                _make_step("Old conversion price", "CP₁ = old_conversion_price", f"CP₁ = {cp1}", cp1),
+                _make_step("New share price (down round)", "P_new = new_share_price", f"P_new = {p_new}", p_new),
+                _make_step("New conversion price", "CP₂ = P_new", f"CP₂ = {p_new}", cp2),
+                _make_step("Price reduction", "reduction = (CP₁ - CP₂) / CP₁ × 100", f"reduction = ({cp1} - {cp2}) / {cp1} × 100", ((cp1 - cp2) / cp1 * D100)),
+            ]
         else:
             consideration = p_new * n_new
             numerator = cp1 * n_old + consideration
@@ -450,6 +524,18 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
             steps.append(f"{label}: CP₂ = (CP₁×N_old + P_new×N_new) / (N_old + N_new)")
             steps.append(f"= (${float(cp1)}×{float(n_old):,.0f} + ${float(p_new)}×{float(n_new):,.0f}) / ({float(n_old):,.0f} + {float(n_new):,.0f})")
             steps.append(f"= ${float(numerator):,.0f} / {float(denominator):,.0f} = ${float(cp2):.4f}")
+            derivation_steps = [
+                _make_step("Method selection", f"{label} weighted average", f"method = {inp.method.value}", inp.method.value),
+                _make_step("Old conversion price", "CP₁ = old_conversion_price", f"CP₁ = {cp1}", cp1),
+                _make_step("Old shares outstanding", "N_old = old_shares_outstanding", f"N_old = {n_old}", n_old),
+                _make_step("New shares issued", "N_new = new_shares_issued", f"N_new = {n_new}", n_new),
+                _make_step("New share price (down round)", "P_new = new_share_price", f"P_new = {p_new}", p_new),
+                _make_step("Consideration", "consideration = P_new × N_new", f"consideration = {p_new} × {n_new}", consideration),
+                _make_step("Numerator", "num = CP₁ × N_old + consideration", f"num = {cp1} × {n_old} + {consideration}", numerator),
+                _make_step("Denominator", "den = N_old + N_new", f"den = {n_old} + {n_new}", denominator),
+                _make_step("New conversion price", "CP₂ = num / den", f"CP₂ = {numerator} / {denominator}", cp2),
+                _make_step("Price reduction", "reduction = (CP₁ - CP₂) / CP₁ × 100", f"reduction = ({cp1} - {cp2}) / {cp1} × 100", ((cp1 - cp2) / cp1 * D100)),
+            ]
 
         reduction = ((cp1 - cp2) / cp1 * D100).quantize(D("0.01"), rounding=ROUND_HALF_UP)
 
@@ -460,6 +546,7 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
             price_reduction_pct=float(reduction),
             old_shares_outstanding=float(n_old),
             formula_steps=steps,
+            derivation_steps=derivation_steps,
         )
 
     # ── Liquidation waterfall ──────────────────────────────
@@ -477,17 +564,29 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
         )
 
         Q = lambda v: v.quantize(D("0.01"), rounding=ROUND_HALF_UP)
+        derivation_steps = [
+            _make_step("Exit value", "exit_value = total liquidation proceeds", f"exit_value = {exit_val}", exit_val),
+        ]
 
         # ── Pass 1: Pay preferences ────────────────────────
         prefs_paid = {}
         remaining = exit_val
+        derivation_steps.append(
+            _make_step("Pass 1: Pay preferences", "Pay each round's liquidation preference in seniority order", f"{len(rounds_sorted)} round(s) to process", exit_val)
+        )
         for orig_idx, rnd in rounds_sorted:
             pref_due = D(str(rnd.investment)) * D(str(rnd.multiple))
             actual = min(pref_due, remaining) if remaining > D0 else D0
             prefs_paid[orig_idx] = actual
             remaining -= actual
+            derivation_steps.append(
+                _make_step(f"Round {orig_idx} preference", f"pref = investment × multiple", f"pref = {rnd.investment} × {rnd.multiple} = {pref_due}, paid = {actual}", actual)
+            )
 
         remaining_after_prefs = remaining
+        derivation_steps.append(
+            _make_step("Remaining after preferences", "remaining = exit_value - total_preferences_paid", f"remaining = {exit_val} - {exit_val - remaining}", remaining)
+        )
 
         # ── Pass 2: Participation / Conversion ─────────────
         # Compute ownership ratios among ALL shareholders for pro-rata
@@ -515,6 +614,9 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
                         cap_excess_returned=0, total_received=float(Q(convert_val)),
                         choice_made="convert",
                     ))
+                    derivation_steps.append(
+                        _make_step(f"Round {orig_idx} participation choice", "convert_val > pref → choose conversion", f"convert_val = {exit_val} × {own_frac} = {convert_val} > pref = {pref} → convert", convert_val)
+                    )
                 else:
                     allocations.append(RoundAllocation(
                         round_index=orig_idx,
@@ -522,6 +624,9 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
                         cap_excess_returned=0, total_received=float(Q(pref)),
                         choice_made="preference",
                     ))
+                    derivation_steps.append(
+                        _make_step(f"Round {orig_idx} participation choice", "convert_val ≤ pref → choose preference", f"convert_val = {exit_val} × {own_frac} = {convert_val} ≤ pref = {pref} → preference", pref)
+                    )
 
             elif rnd.participation in (ParticipationType.PARTICIPATING, ParticipationType.PARTICIPATING_CAPPED):
                 part = remaining_after_prefs * own_frac if remaining_after_prefs > D0 else D0
@@ -535,12 +640,21 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
                         part = cap_limit - pref
                         participate_total = cap_limit
                         choice = "participate_capped"
+                        derivation_steps.append(
+                            _make_step(f"Round {orig_idx} cap check", "raw_total > cap_limit → cap applies", f"raw_total = {raw_total} > cap_limit = {inv} × {rnd.cap_multiple} = {cap_limit} → capped", cap_limit)
+                        )
                     else:
                         participate_total = raw_total
                         choice = "participate"
+                        derivation_steps.append(
+                            _make_step(f"Round {orig_idx} cap check", "raw_total ≤ cap_limit → no cap", f"raw_total = {raw_total} ≤ cap_limit = {cap_limit} → uncapped", raw_total)
+                        )
                 else:
                     participate_total = raw_total
                     choice = "participate"
+                    derivation_steps.append(
+                        _make_step(f"Round {orig_idx} participation", "participating (uncapped): pref + pro-rata", f"pref = {pref}, part = {remaining_after_prefs} × {own_frac} = {part}", raw_total)
+                    )
 
                 convert_val = exit_val * own_frac
                 if convert_val > participate_total:
@@ -553,6 +667,9 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
                         cap_excess_returned=0, total_received=float(Q(convert_val)),
                         choice_made="convert",
                     ))
+                    derivation_steps.append(
+                        _make_step(f"Round {orig_idx} final choice", "convert_val > participate_total → convert", f"convert_val = {convert_val} > participate_total = {participate_total} → convert", convert_val)
+                    )
                 else:
                     allocations.append(RoundAllocation(
                         round_index=orig_idx,
@@ -561,6 +678,9 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
                         total_received=float(Q(participate_total)),
                         choice_made=choice,
                     ))
+                    derivation_steps.append(
+                        _make_step(f"Round {orig_idx} final choice", f"{choice}: pref + participation", f"pref = {Q(pref)}, part = {Q(part)}, total = {Q(participate_total)}", participate_total)
+                    )
             else:
                 allocations.append(RoundAllocation(
                     round_index=orig_idx,
@@ -568,11 +688,21 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
                     cap_excess_returned=0, total_received=float(Q(pref)),
                     choice_made="preference",
                 ))
+                derivation_steps.append(
+                    _make_step(f"Round {orig_idx} fallback", "preference only (fallback)", f"pref = {pref}", pref)
+                )
 
         total_pref = sum(D(str(a.preference_amount)) for a in allocations)
         total_part = sum(D(str(a.participation_amount)) for a in allocations)
         common_total = exit_val - total_pref - total_part
         common_total = max(D0, common_total)
+
+        derivation_steps.append(
+            _make_step("Common shareholder total", "common = exit - total_pref - total_part", f"common = {exit_val} - {total_pref} - {total_part}", common_total)
+        )
+        derivation_steps.append(
+            _make_step("Verification sum", "sum = total_pref + total_part + common", f"sum = {total_pref} + {total_part} + {common_total}", total_pref + total_part + common_total)
+        )
 
         return LiquidationWaterfallOutput(
             exit_value=float(exit_val),
@@ -581,6 +711,7 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
             allocations=allocations,
             common_total=float(Q(common_total)),
             verification_sum=float(Q(total_pref + total_part + common_total)),
+            derivation_steps=derivation_steps,
         )
 
     # ── Participation classification ───────────────────────
@@ -588,40 +719,83 @@ class VCWaterfallExpert(DeterministicSubtaskExpert):
     def _classify_participation(self, inp: ParticipationClassifyInput) -> ParticipationClassifyOutput:
         text = " ".join(kw.lower() for kw in inp.clause_text_keywords)
 
+        derivation_steps = [
+            _make_step("Input keywords", "Normalize all keywords to lowercase and join", f"keywords = {inp.clause_text_keywords}", text),
+            _make_step("Normalize text", "text = join(keywords).lower()", f"text = '{text}'", text),
+        ]
+
         if "non-participating" in text or "non participating" in text:
+            derivation_steps.append(
+                _make_step("Pattern match", "Check 'non-participating' or 'non participating'", f"Found in: '{text}'", "match")
+            )
+            derivation_steps.append(
+                _make_step("Classification decision", "non-participating → investor chooses preference OR conversion", "Explicit non-participating keyword", "non_participating")
+            )
             return ParticipationClassifyOutput(
                 classification="non_participating",
                 confidence=0.95,
                 reasoning="Keyword 'non-participating' detected. Investor chooses between preference or conversion.",
+                derivation_steps=derivation_steps,
             )
         has_no_cap = "no cap" in text or "without cap" in text or "uncapped" in text
+        derivation_steps.append(
+            _make_step("Check 'no cap' patterns", "Check 'no cap', 'without cap', 'uncapped'", f"has_no_cap = {has_no_cap}", has_no_cap)
+        )
         if has_no_cap:
             if "participating" in text or "participation" in text or "participate" in text:
+                derivation_steps.append(
+                    _make_step("Pattern match", "Check 'participating'/'participation'/'participate' + no cap", f"Found participating keywords with no cap in: '{text}'", "match")
+                )
+                derivation_steps.append(
+                    _make_step("Classification decision", "participating + no cap → unlimited participation", "Participating without cap = uncapped participation", "participating")
+                )
                 return ParticipationClassifyOutput(
                     classification="participating",
                     confidence=0.90,
                     reasoning="Keywords 'participating' + explicit 'no cap/uncapped'. Unlimited participation.",
+                    derivation_steps=derivation_steps,
                 )
         if "capped" in text or ("cap" in text and not has_no_cap):
             if "participating" in text or "participation" in text or "participate" in text:
+                derivation_steps.append(
+                    _make_step("Pattern match", "Check 'capped'/'cap' + participating keywords", f"Found cap + participating in: '{text}'", "match")
+                )
+                derivation_steps.append(
+                    _make_step("Classification decision", "participating + cap → capped participation", "Investor gets preference + participation up to cap", "participating_capped")
+                )
                 return ParticipationClassifyOutput(
                     classification="participating_capped",
                     confidence=0.90,
                     reasoning="Keywords 'participating' + 'cap/capped' detected. Investor gets preference + participation up to cap.",
+                    derivation_steps=derivation_steps,
                 )
 
         if "participating" in text or "participation" in text or "participate" in text or "double-dip" in text or "double dip" in text:
             if "cap" not in text and "capped" not in text:
+                derivation_steps.append(
+                    _make_step("Pattern match", "Check participating keywords without cap", f"Found participating without cap in: '{text}'", "match")
+                )
+                derivation_steps.append(
+                    _make_step("Classification decision", "participating keywords without 'cap' → uncapped participating", "Default to unlimited participation", "participating")
+                )
                 return ParticipationClassifyOutput(
                     classification="participating",
                     confidence=0.85,
                     reasoning="Keyword 'participating' without 'cap'. Investor gets preference + unlimited participation.",
+                    derivation_steps=derivation_steps,
                 )
 
+        derivation_steps.append(
+            _make_step("No keywords matched", "No participation keywords found", f"text = '{text}'", "no match")
+        )
+        derivation_steps.append(
+            _make_step("Classification decision", "Default to non-participating (market standard)", "No clear participation indicators", "non_participating")
+        )
         return ParticipationClassifyOutput(
             classification="non_participating",
             confidence=0.50,
             reasoning="No clear participation keywords found. Defaulting to non-participating (market standard).",
+            derivation_steps=derivation_steps,
         )
 
     # ── Ability boundary ───────────────────────────────────

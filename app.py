@@ -43,12 +43,47 @@ def _metric_line(metrics: dict, phase_name: str):
             st.caption(f"{dur:.1f}s" + (f" ({retries} retries)" if retries else ""))
 
 
+REVIEW_FIELDS = {
+    "safe_conversion": [
+        ("safe_investment", "SAFE Investment ($)", "number"),
+        ("safe_cap", "SAFE Valuation Cap ($)", "number"),
+        ("pre_money_valuation", "Series A Pre-money ($)", "number"),
+        ("series_a_investment", "Series A Investment ($)", "number"),
+        ("founder_shares", "Founder Shares", "number"),
+        ("discount_rate", "Discount Rate (0-1, 0=none)", "number"),
+    ],
+    "anti_dilution": [
+        ("old_conversion_price", "Original Conversion Price ($)", "number"),
+        ("old_shares_outstanding", "Shares Outstanding Before", "number"),
+        ("new_shares_issued", "New Shares Issued", "number"),
+        ("new_share_price", "New Share Price ($)", "number"),
+        ("method", "Method", "text"),
+    ],
+    "liquidation_waterfall": [
+        ("exit_value", "Exit Value ($)", "number"),
+        ("common_ownership_pct", "Common Ownership %", "number"),
+    ],
+    "participation_classify": [
+        ("clause_text_keywords", "Keywords", "text"),
+    ],
+}
+
+
+def _render_confidence_badge(level: str):
+    if level == "GREEN":
+        st.success("GREEN: Pure deterministic calculation — no AI hallucination risk")
+    elif level == "YELLOW":
+        st.warning("YELLOW: Parameters extracted by AI + deterministic calculation — please verify inputs above")
+    elif level == "RED":
+        st.error("RED: Unable to process — please check input format or use Manual Mode")
+
+
 def render_agent_pipeline(machine: PhaseStateMachine):
     phase = machine.current_phase
     ctx = st.session_state
     metrics = ctx.get("pipeline_metrics", {})
 
-    with st.status("1/5 Intent Routing",
+    with st.status("1/7 Intent Routing",
                    expanded=phase == Phase.ROUTING,
                    state=_state_for(phase, Phase.ROUTING)) as s1:
         if phase.value > Phase.ROUTING.value:
@@ -56,9 +91,9 @@ def render_agent_pipeline(machine: PhaseStateMachine):
             st.write(f"**Clause type**: {r.get('clause_type', 'unknown')} "
                      f"(confidence: {r.get('confidence', 0):.0%})")
             _metric_line(metrics, "ROUTING")
-            s1.update(label="1/5 Routing done", state="complete")
+            s1.update(label="1/7 Routing done", state="complete")
 
-    with st.status("2/5 Structured Extraction",
+    with st.status("2/7 Structured Extraction",
                    expanded=phase == Phase.EXTRACTION,
                    state=_state_for(phase, Phase.EXTRACTION)) as s2:
         if phase.value > Phase.EXTRACTION.value:
@@ -69,11 +104,51 @@ def render_agent_pipeline(machine: PhaseStateMachine):
             elif sem:
                 st.warning(f"Semantic range warning: {sem['warnings']}")
             _metric_line(metrics, "EXTRACTION")
-            s2.update(label="2/5 Extraction done", state="complete")
+            s2.update(label="2/7 Extraction done", state="complete")
 
-    with st.status("3/5 Blind Spot Scan",
+    with st.status("3/7 Parameter Review",
+                   expanded=phase == Phase.EXTRACTION_REVIEW,
+                   state=_state_for(phase, Phase.EXTRACTION_REVIEW)) as s3:
+        if phase == Phase.EXTRACTION_REVIEW:
+            st.warning("AI extracted these parameters. Please verify before proceeding.")
+            extracted = ctx.get('extracted_json', {})
+            clause_type = extracted.get('clause_type',
+                                       ctx.get('route_result', {}).get('clause_type', ''))
+            fields = REVIEW_FIELDS.get(clause_type, [])
+            edited = {}
+            with st.form("extraction_review_form"):
+                for key, label, ftype in fields:
+                    default = extracted.get(key, "")
+                    if ftype == "number":
+                        val = st.number_input(
+                            label,
+                            value=float(default) if default not in (None, "") else 0.0,
+                            format="%.4f",
+                        )
+                    else:
+                        val = st.text_input(
+                            label,
+                            value=str(default) if default not in (None, "") else "",
+                        )
+                    edited[key] = val
+                confirmed = st.form_submit_button("Confirm and Continue")
+                if confirmed:
+                    edited["clause_type"] = clause_type
+                    ctx.extracted_json = edited
+                    ctx.confidence_level = "GREEN"
+                    machine._record_exit(Phase.EXTRACTION_REVIEW)
+                    machine.current_phase = Phase.BLINDSPOT
+                    machine._record_enter(Phase.BLINDSPOT)
+                    st.rerun()
+        elif phase.value > Phase.EXTRACTION_REVIEW.value:
+            st.json(ctx.get('extracted_json', {}))
+            st.success("Parameters confirmed by user")
+            _metric_line(metrics, "EXTRACTION_REVIEW")
+            s3.update(label="3/7 Parameter review done", state="complete")
+
+    with st.status("4/7 Blind Spot Scan",
                    expanded=phase == Phase.BLINDSPOT,
-                   state=_state_for(phase, Phase.BLINDSPOT)) as s3:
+                   state=_state_for(phase, Phase.BLINDSPOT)) as s4:
         if phase.value > Phase.BLINDSPOT.value:
             bs = ctx.get('blindspot_result', {})
             alerts = bs.get('alerts', [])
@@ -86,11 +161,11 @@ def render_agent_pipeline(machine: PhaseStateMachine):
             else:
                 st.write("No known blind spot patterns detected")
             _metric_line(metrics, "BLINDSPOT")
-            s3.update(label="3/5 Blind spot scan done", state="complete")
+            s4.update(label="4/7 Blind spot scan done", state="complete")
 
-    with st.status("4/5 Deterministic Calculation",
+    with st.status("5/7 Deterministic Calculation",
                    expanded=phase == Phase.CALCULATION,
-                   state=_state_for(phase, Phase.CALCULATION)) as s4:
+                   state=_state_for(phase, Phase.CALCULATION)) as s5:
         if phase.value > Phase.CALCULATION.value:
             st.write("**Engine**: Pure Python algebra (zero LLM calls)")
             result = ctx.get('calc_result', {})
@@ -117,14 +192,42 @@ def render_agent_pipeline(machine: PhaseStateMachine):
                 elif 'classification' in result:
                     c1, c2 = st.columns(2)
                     c1.metric("Classification", result["classification"])
-                    c2.metric("Confidence", f"{result['confidence']:.0%}")
-            _metric_line(metrics, "CALCULATION")
-            s4.update(label="4/5 Calculation done", state="complete")
+                    c2.metric("Confidence", f"{result['confidence']:.0f}%")
 
-    with st.status("5/5 Validation & Report",
+            derivation_steps = result.get("derivation_steps", []) if result else []
+            if derivation_steps:
+                with st.expander("Calculation Proof (Step-by-step)"):
+                    for i, step in enumerate(derivation_steps, 1):
+                        st.markdown(f"**Step {i}: {step.get('step', '')}**")
+                        st.code(step.get('formula', ''), language="text")
+                        st.caption(f"Values: {step.get('values', '')}")
+                        st.info(f"Result: {step.get('result', '')}")
+
+                    from export_utils import generate_proof_excel
+                    excel_bytes = generate_proof_excel(
+                        ctx.get('calc_result', {}),
+                        ctx.get('extracted_json', {}),
+                        ctx.get('route_result', {}).get('clause_type', ''),
+                    )
+                    st.download_button(
+                        "Export to Excel",
+                        data=excel_bytes,
+                        file_name="calculation_proof.xlsx",
+                        mime="application/vnd.openxmlformats.officedocument.spreadsheetml.sheet",
+                    )
+
+            _metric_line(metrics, "CALCULATION")
+            s5.update(label="5/7 Calculation done", state="complete")
+
+    with st.status("6/7 Validation & Report",
                    expanded=phase == Phase.VALIDATION,
-                   state=_state_for(phase, Phase.VALIDATION)) as s5:
+                   state=_state_for(phase, Phase.VALIDATION)) as s6:
         if phase.value >= Phase.VALIDATION.value and phase != Phase.ROUTING:
+            confidence = ctx.get('confidence_level', 'YELLOW')
+            if phase == Phase.ERROR:
+                confidence = 'RED'
+            _render_confidence_badge(confidence)
+
             st.write(ctx.get('validator_result', {}))
             gap = ctx.get('gap_data')
             if gap and not gap.get('error'):
@@ -144,9 +247,10 @@ def render_agent_pipeline(machine: PhaseStateMachine):
                 else:
                     st.success(f"Delta: {delta:.1f}% = aligned")
             _metric_line(metrics, "VALIDATION")
-            s5.update(label="5/5 Validation done", state="complete")
+            s6.update(label="6/7 Validation done", state="complete")
 
     if phase == Phase.ERROR:
+        _render_confidence_badge("RED")
         st.error(f"Pipeline error: {ctx.get('error_msg', 'Unknown error')}")
         st.info("Try: check clause text format, or switch to Manual Mode")
         if st.button("Restart"):
@@ -211,17 +315,25 @@ def render_manual_calculator():
                     c3.metric("Founder Ownership", f"{result['founder_ownership_pct']:.2f}%")
                     st.markdown(f"**Total Shares:** {result['total_shares']:,.0f} | **Price/Share:** ${result['price_per_share']:.4f} | **Pre-money Verify:** ${result['pre_money_verification']:,.0f}")
                     with st.expander("Derivation"):
-                        deriv = f"SAFE% (cap) = ${safe_inv:,.0f} / ${safe_cap:,.0f} = {safe_inv/safe_cap*100:.2f}%\n"
-                        deriv += f"SeriesA% = ${sa_inv:,.0f} / (${pre_money:,.0f} + ${sa_inv:,.0f}) = {result['series_a_ownership_pct']:.2f}%\n"
-                        if discount_input > 0 and result.get("discount_price_per_share"):
-                            deriv += f"\nCap Price/Share = ${result['cap_price_per_share']:.4f}\n"
-                            deriv += f"Discount Price/Share = SeriesA Price * (1 - {discount_input:.0f}%) = ${result['discount_price_per_share']:.4f}\n"
-                            deriv += f"Effective = min(cap, discount) = ${result['cap_price_per_share'] if mechanism in ('cap_only','cap') else result['discount_price_per_share']:.4f}\n\n"
-                        deriv += f"Founder% = {result['founder_ownership_pct']:.2f}%\n"
-                        deriv += f"Total Shares = {founder_shares:,} / {result['founder_ownership_pct']/100:.6f} = {result['total_shares']:,.0f}\n"
-                        deriv += f"Price/Share = ${sa_inv:,.0f} / {result['series_a_shares']:,.0f} = ${result['price_per_share']:.4f}\n"
-                        deriv += f"Pre-money Verify = ${result['pre_money_verification']:,.0f}"
-                        st.code(deriv, language="python")
+                        derivation_steps = result.get("derivation_steps", [])
+                        if derivation_steps:
+                            for i, step in enumerate(derivation_steps, 1):
+                                st.markdown(f"**Step {i}: {step.get('step', '')}**")
+                                st.code(step.get('formula', ''), language="text")
+                                st.caption(f"Values: {step.get('values', '')}")
+                                st.info(f"Result: {step.get('result', '')}")
+                        else:
+                            deriv = f"SAFE% (cap) = ${safe_inv:,.0f} / ${safe_cap:,.0f} = {safe_inv/safe_cap*100:.2f}%\n"
+                            deriv += f"SeriesA% = ${sa_inv:,.0f} / (${pre_money:,.0f} + ${sa_inv:,.0f}) = {result['series_a_ownership_pct']:.2f}%\n"
+                            if discount_input > 0 and result.get("discount_price_per_share"):
+                                deriv += f"\nCap Price/Share = ${result['cap_price_per_share']:.4f}\n"
+                                deriv += f"Discount Price/Share = SeriesA Price * (1 - {discount_input:.0f}%) = ${result['discount_price_per_share']:.4f}\n"
+                                deriv += f"Effective = min(cap, discount) = ${result['cap_price_per_share'] if mechanism in ('cap_only','cap') else result['discount_price_per_share']:.4f}\n\n"
+                            deriv += f"Founder% = {result['founder_ownership_pct']:.2f}%\n"
+                            deriv += f"Total Shares = {founder_shares:,} / {result['founder_ownership_pct']/100:.6f} = {result['total_shares']:,.0f}\n"
+                            deriv += f"Price/Share = ${sa_inv:,.0f} / {result['series_a_shares']:,.0f} = ${result['price_per_share']:.4f}\n"
+                            deriv += f"Pre-money Verify = ${result['pre_money_verification']:,.0f}"
+                            st.code(deriv, language="python")
                 else:
                     st.error(f"Computation failed: {result}")
 
@@ -254,9 +366,16 @@ def render_manual_calculator():
                     c1, c2 = st.columns(2)
                     c1.metric("New Conversion Price", f"${result['new_conversion_price']:.4f}")
                     c2.metric("Price Reduction", f"{result['price_reduction_pct']:.2f}%")
-                    if result.get("formula_steps"):
+                    if result.get("formula_steps") or result.get("derivation_steps"):
                         with st.expander("Derivation"):
-                            for step in result["formula_steps"]:
+                            derivation_steps = result.get("derivation_steps", [])
+                            if derivation_steps:
+                                for i, step in enumerate(derivation_steps, 1):
+                                    st.markdown(f"**Step {i}: {step.get('step', '')}**")
+                                    st.code(step.get('formula', ''), language="text")
+                                    st.caption(f"Values: {step.get('values', '')}")
+                                    st.info(f"Result: {step.get('result', '')}")
+                            for step in result.get("formula_steps", []):
                                 st.markdown(step)
                 else:
                     st.error(f"Computation failed: {result}")
@@ -313,7 +432,7 @@ def render_manual_calculator():
                 if ok:
                     c1, c2 = st.columns(2)
                     c1.metric("Classification", result["classification"])
-                    c2.metric("Confidence", f"{result['confidence']:.0%}")
+                    c2.metric("Confidence", f"{result['confidence']:.0f}%")
                     st.info(result["reasoning"])
                 else:
                     st.error(f"Classification failed: {result}")
