@@ -30,33 +30,59 @@ with tab_safe:
         with c2:
             pre_money = st.number_input("Series A Pre-money ($)", value=15_000_000, step=500_000, format="%d")
             sa_inv = st.number_input("Series A Investment ($)", value=5_000_000, step=500_000, format="%d")
-        founder_shares = st.number_input("Founder Shares", value=8_000_000, step=100_000, format="%d")
+        c3, c4 = st.columns(2)
+        with c3:
+            founder_shares = st.number_input("Founder Shares", value=8_000_000, step=100_000, format="%d")
+        with c4:
+            discount_input = st.number_input("Discount Rate % (0 = none)", value=0.0, min_value=0.0, max_value=99.0, step=5.0, format="%.0f")
         submitted = st.form_submit_button("Calculate")
         if submitted:
-            ok, result, boundary = expert.process({
+            payload = {
                 "clause_type": "safe_conversion",
                 "safe_investment": safe_inv,
                 "safe_cap": safe_cap,
                 "pre_money_valuation": pre_money,
                 "series_a_investment": sa_inv,
                 "founder_shares": founder_shares,
-            })
+            }
+            if discount_input > 0:
+                payload["discount_rate"] = discount_input / 100.0
+            ok, result, boundary = expert.process(payload)
             if ok:
+                mechanism = result["effective_mechanism"]
+                mech_labels = {
+                    "cap_only": "Valuation Cap Only",
+                    "cap": "Valuation Cap (lower)",
+                    "discount": "Discount Rate (lower)",
+                }
+                st.info(f"**Effective Mechanism:** {mech_labels.get(mechanism, mechanism)}")
+
+                if result.get("cap_price_per_share") and result.get("discount_price_per_share"):
+                    pc1, pc2 = st.columns(2)
+                    cap_highlight = " **<- binding**" if mechanism in ("cap_only", "cap") else ""
+                    disc_highlight = " **<- binding**" if mechanism == "discount" else ""
+                    pc1.metric("Cap Price/Share", f"${result['cap_price_per_share']:.4f}",
+                               delta="binding" if mechanism in ("cap_only", "cap") else None)
+                    pc2.metric("Discount Price/Share", f"${result['discount_price_per_share']:.4f}",
+                               delta="binding" if mechanism == "discount" else None)
+
                 c1, c2, c3 = st.columns(3)
                 c1.metric("SAFE Ownership", f"{result['safe_ownership_pct']:.2f}%")
                 c2.metric("Series A Ownership", f"{result['series_a_ownership_pct']:.2f}%")
                 c3.metric("Founder Ownership", f"{result['founder_ownership_pct']:.2f}%")
                 st.markdown(f"**Total Shares:** {result['total_shares']:,.0f} | **Price/Share:** ${result['price_per_share']:.4f} | **Pre-money Verify:** ${result['pre_money_verification']:,.0f}")
                 with st.expander("Derivation"):
-                    st.code(
-                        f"SAFE% = ${safe_inv:,.0f} / ${safe_cap:,.0f} = {result['safe_ownership_pct']:.2f}%\n"
-                        f"SeriesA% = ${sa_inv:,.0f} / (${pre_money:,.0f} + ${sa_inv:,.0f}) = {result['series_a_ownership_pct']:.2f}%\n"
-                        f"Founder% = 100% - {result['safe_ownership_pct']:.2f}% - {result['series_a_ownership_pct']:.2f}% = {result['founder_ownership_pct']:.2f}%\n"
-                        f"Total Shares = {founder_shares:,} / {result['founder_ownership_pct']/100:.6f} = {result['total_shares']:,.0f}\n"
-                        f"Price/Share = ${sa_inv:,.0f} / {result['series_a_shares']:,.0f} = ${result['price_per_share']:.4f}\n"
-                        f"Pre-money Verify = ({founder_shares:,} + {result['safe_shares']:,.0f}) * ${result['price_per_share']:.4f} = ${result['pre_money_verification']:,.0f}",
-                        language="python"
-                    )
+                    deriv = f"SAFE% (cap) = ${safe_inv:,.0f} / ${safe_cap:,.0f} = {safe_inv/safe_cap*100:.2f}%\n"
+                    deriv += f"SeriesA% = ${sa_inv:,.0f} / (${pre_money:,.0f} + ${sa_inv:,.0f}) = {result['series_a_ownership_pct']:.2f}%\n"
+                    if discount_input > 0 and result.get("discount_price_per_share"):
+                        deriv += f"\nCap Price/Share = ${result['cap_price_per_share']:.4f}\n"
+                        deriv += f"Discount Price/Share = SeriesA Price * (1 - {discount_input:.0f}%) = ${result['discount_price_per_share']:.4f}\n"
+                        deriv += f"Effective = min(cap, discount) = ${result['cap_price_per_share'] if mechanism in ('cap_only','cap') else result['discount_price_per_share']:.4f}\n\n"
+                    deriv += f"Founder% = {result['founder_ownership_pct']:.2f}%\n"
+                    deriv += f"Total Shares = {founder_shares:,} / {result['founder_ownership_pct']/100:.6f} = {result['total_shares']:,.0f}\n"
+                    deriv += f"Price/Share = ${sa_inv:,.0f} / {result['series_a_shares']:,.0f} = ${result['price_per_share']:.4f}\n"
+                    deriv += f"Pre-money Verify = ${result['pre_money_verification']:,.0f}"
+                    st.code(deriv, language="python")
             else:
                 st.error(f"Computation failed: {result}")
 
