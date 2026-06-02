@@ -7,3 +7,4 @@ __pycache__/
 *.yaml
 *.yml
 profile*
+generate_pptx.py
