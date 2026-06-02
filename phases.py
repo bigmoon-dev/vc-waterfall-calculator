@@ -117,7 +117,6 @@ class PhaseStateMachine:
         self._record_exit(self.current_phase)
         self.current_phase = target
         self._record_enter(target)
-        st.rerun()
 
     def _rework_to(self, target: Phase, reason: str):
         self._record_exit(self.current_phase, status=f"rework->{target.name}")
@@ -125,7 +124,6 @@ class PhaseStateMachine:
                        self.current_phase.name, target.name, reason)
         self.current_phase = target
         self._record_enter(target)
-        st.rerun()
 
     def _go_error(self, msg: str):
         self._record_exit(self.current_phase, status="error")
@@ -151,15 +149,20 @@ class PhaseStateMachine:
         try:
             if phase == Phase.ROUTING:
                 self._execute_routing(ctx)
-            elif phase == Phase.EXTRACTION:
+                phase = self.current_phase
+            if phase == Phase.EXTRACTION:
                 self._execute_extraction(ctx)
-            elif phase == Phase.EXTRACTION_REVIEW:
+                phase = self.current_phase
+            if phase == Phase.EXTRACTION_REVIEW:
                 self._execute_extraction_review(ctx)
-            elif phase == Phase.BLINDSPOT:
+                return
+            if phase == Phase.BLINDSPOT:
                 self._execute_blindspot(ctx)
-            elif phase == Phase.CALCULATION:
+                phase = self.current_phase
+            if phase == Phase.CALCULATION:
                 self._execute_calculation(ctx)
-            elif phase == Phase.VALIDATION:
+                phase = self.current_phase
+            if phase == Phase.VALIDATION:
                 self._execute_validation(ctx)
 
         except PhaseExitConditionError as e:

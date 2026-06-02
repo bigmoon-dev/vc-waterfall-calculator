@@ -148,6 +148,7 @@ def render_agent_pipeline(machine: PhaseStateMachine):
                     machine._record_exit(Phase.EXTRACTION_REVIEW)
                     machine.current_phase = Phase.BLINDSPOT
                     machine._record_enter(Phase.BLINDSPOT)
+                    machine.execute_current_phase()
                     st.rerun()
         elif phase.value > Phase.EXTRACTION_REVIEW.value:
             st.json(ctx.get('extracted_json', {}))
@@ -584,6 +585,8 @@ else:
             st.session_state.raw_text = sanitize_input(user_input)
             machine.reset()
             machine.current_phase = Phase.ROUTING
+            machine._record_enter(Phase.ROUTING)
+            machine.execute_current_phase()
             st.rerun()
 
         if machine.current_phase != Phase.IDLE:
