@@ -586,9 +586,7 @@ else:
             st.rerun()
 
         if machine.current_phase != Phase.IDLE:
-            st.caption(f"DEBUG: phase={machine.current_phase.name} done={getattr(machine, '_done', '?')}")
             machine.execute_current_phase()
-            st.caption(f"DEBUG: after execute phase={machine.current_phase.name}")
             render_agent_pipeline(machine)
 
     with tab_glossary:
