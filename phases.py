@@ -85,11 +85,13 @@ class PhaseStateMachine:
         self.current_phase = Phase.IDLE
         self._metrics: Dict[str, PhaseMetrics] = {}
         self._retry_counts: Dict[Phase, int] = {}
+        self._done = False
 
     def reset(self):
         self.current_phase = Phase.IDLE
         self._metrics = {}
         self._retry_counts = {}
+        self._done = False
 
     def _record_enter(self, phase: Phase):
         name = phase.name
@@ -143,7 +145,7 @@ class PhaseStateMachine:
         ctx = st.session_state
         phase = self.current_phase
 
-        if phase == Phase.IDLE:
+        if phase == Phase.IDLE or self._done:
             return
 
         try:
@@ -291,7 +293,9 @@ class PhaseStateMachine:
             for name, m in self._metrics.items()
             if m.entered_at and m.exited_at
         }
-        self._advance(Phase.IDLE)
+        self._record_exit(Phase.VALIDATION)
+        self.current_phase = Phase.VALIDATION
+        self._done = True
 
     def get_metrics_summary(self) -> dict:
         return {
